@@ -1,0 +1,95 @@
+Program: em_test_runner.rb
+Purpose: em_test_runner is a ruby unit test framework which is similar to
+test/unit, but which is designed to work with EventMachine.
+Author: Bill Kelly, 2009
+License: Released into the public domain (NO WARRANTY)
+
+Example of difficulty combining traditional test/unit and EM:
+
+  def test_foo
+    EM.add_timer(0.5) do
+      assert( "kazango" )
+    end
+  end
+
+`test_foo' will complete immediately from the point of view of test/unit,
+whereas we would prefer it wait until the EM timer callback occurred.
+
+In em_test_runner, the above is rewritten as:
+
+  def test_foo(completed)
+    EM.add_timer(0.5) do
+      assert( "kazango" )
+      completed.call  # let the framework know we're done
+    end
+  end
+
+
+Further examples:
+
+  class FooBase < TestEM::TestCase
+    # no tests defined here, but not considered an error,
+    # because there are derived classes
+  end
+  
+  class Foo < FooBase
+    def test_simple(completed)
+      assert(true)
+      completed.call
+    end
+    
+    def test_deferred(completed)
+      assert_equal("Humbert", "Humbert")
+      EM.add_timer(0.25) do
+        assert(true)
+        completed.call
+      end
+    end
+  end
+
+  class Bar < TestEM::TestCase
+    # no tests defined (error)
+  end
+
+  class Baz < TestEM::TestCase
+    def test_timeout(completed)
+      set_timeout(1)
+      # we never call `completed' , so this
+      # test will fail with a timeout
+      # NOTE: timeout is reset to default via 
+      # set_timeout(default_timeout_secs)
+      # before each test_ invocation.
+      # (default can be overridden.)
+    end    
+  end
+
+
+em_test_runner runs all the test suites in a single 
+EventMachine.run { } invocation, no need to start/stop
+the reactor between tests.
+
+Further, if you have a need to perform some one-time 
+init after EM.run { } but prior to any tests being executed,
+a hook mechanism is provided:
+
+  TestEM::Runner.after_em_start do |completed|
+    $initcb = "uno "
+    EM.add_timer(0.25) do
+      $initcb << "tres."
+      completed.call
+    end
+  end
+
+  TestEM::Runner.after_em_start do |completed|
+    $initcb << "dos "
+    completed.call
+  end
+
+$initcb will be "uno dos tres." after the init blocks run
+in sequence.
+
+
+Enjoy,
+
+Bill
+

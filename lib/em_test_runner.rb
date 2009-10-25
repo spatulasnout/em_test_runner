@@ -1,4 +1,5 @@
 #
+# em_test_runner V0.1
 # EventMachine savvy unit test harness.
 # Written 2009 Bill Kelly
 # Released into the public domain.
