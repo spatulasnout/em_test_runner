@@ -1,11 +1,14 @@
 #
-# em_test_runner V0.1
+# em_test_runner V0.2
 # EventMachine savvy unit test harness.
 # Written 2009 Bill Kelly
 # Released into the public domain.
 #
 
 require 'eventmachine'
+if defined? Fiber
+  require 'fiber'
+end
 
 module TestEM
 
@@ -155,8 +158,17 @@ class Runner
   def initiate_test(suite_instance, test_method)
     @test_start_time = Time.now
     completion_callback = lambda {advance_to_next_test}
-    catch :failed do
-      suite_instance.initiate_test(test_method, completion_callback)
+    if defined? Fiber
+      runner = Fiber.new do
+        catch :failed do
+          suite_instance.initiate_test(test_method, completion_callback)
+        end
+      end
+      runner.transfer
+    else
+      catch :failed do
+        suite_instance.initiate_test(test_method, completion_callback)
+      end
     end
   end
   
