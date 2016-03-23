@@ -128,9 +128,7 @@ class Runner
     if @explicit_tests.empty?
       @randomize_test_order ? suites.sort_by {rand} : suites.sort_by {|k| k.name}
     else
-      suite_names_from_explicit_tests.map do |name|
-        suites.find {|sc| sc.name == name}
-      end.compact
+      suites.select {|sc| find_test_methods(sc).length.nonzero?}
     end
   end
 
@@ -216,7 +214,9 @@ class Runner
   def record_explicit_tests_encountered(suite_class, tests)
     tests.each do |m|
       xname = "#{suite_class.name}.#{m}"
-      @explicit_tests[xname] += 1 if @explicit_tests.has_key? xname
+      if (@explicit_tests.has_key?(xk=xname) || @explicit_tests.has_key?(xk=m.to_s))
+        @explicit_tests[xk] += 1
+      end
     end
   end
 
@@ -226,7 +226,7 @@ class Runner
       @randomize_test_order ? meths.sort_by {rand} : meths.sort_by {|m| m.to_s}
     else
       @explicit_tests_list.map do |name|
-        meths.find {|m| "#{klass.name}.#{m}" == name}
+        meths.find {|m| ("#{klass.name}.#{m}" == name) || (m.to_s == name)}
       end.compact
     end
   end
@@ -688,11 +688,11 @@ else
 
   ############################################################################
   # first try running only explicitly selected tests
-  r = TestEM::Runner.new(%w(Qux.test_qux Foo.test_foo Bogus.test_nonexistent), out, randomize_test_order:false)
+  r = TestEM::Runner.new(%w(Qux.test_qux test_foo Bogus.test_nonexistent), out, randomize_test_order:false)
 
   # verify the runner locates suites properly:
   suites = r.find_test_suites
-  assert_equal( %w(Qux Foo), suites.map{|tc| tc.name} )
+  assert_equal( %w(Foo Qux), suites.map{|tc| tc.name}.sort )
   
   r.run
   
