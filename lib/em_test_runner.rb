@@ -1,10 +1,42 @@
 #
-# em_test_runner V0.2
+# em_test_runner V0.6.2
+#
 # EventMachine savvy unit test harness.
-# Written 2009 Bill Kelly
-# Released into the public domain.
+#
+# Copyright (c) 2009 - 2016 Bill Kelly.  All Rights Reserved.
+# 
+# Redistribution and use in source and binary forms, with or without 
+# modification, are permitted provided that the following conditions 
+# are met: 
+# 
+# 1. Redistributions of source code must retain the above copyright 
+# notice, this list of conditions and the following disclaimer.  
+# 
+# 2. Redistributions in binary form must reproduce the above 
+# copyright notice, this list of conditions and the following 
+# disclaimer in the documentation and/or other materials provided 
+# with the distribution.  
+# 
+# 3. Neither the name of the copyright holder nor the names of its 
+# contributors may be used to endorse or promote products derived 
+# from this software without specific prior written permission.  
+# 
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND 
+# CONTRIBUTORS "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, 
+# INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF 
+# MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE 
+# DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT HOLDER OR 
+# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, 
+# SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT 
+# LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF 
+# USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED 
+# AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT 
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN 
+# ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE 
+# POSSIBILITY OF SUCH DAMAGE.
 #
 
+require 'pp'
 require 'eventmachine'
 if defined? Fiber
   require 'fiber'
@@ -21,14 +53,16 @@ class Runner
     @@one_time_init_blocks << block
   end
   
-  def initialize
+  def initialize(explicit_tests=[], out=$stderr, flags={randomize_test_order:true})
     @@one_time_init_blocks ||= []
+    @randomize_test_order = flags[:randomize_test_order]
     @num_attempts = 0
     @num_failures = 0
     @num_errors = 0
     @failures = []
     @errors = []
-    @out = $stderr
+    @out = out
+    init_explicit_tests(explicit_tests)
   end
 
   def run
@@ -38,31 +72,42 @@ class Runner
   end
   
   def find_test_suites
-    em_test_classes = []
-    ObjectSpace.each_object do |o|
-      if o.respond_to? :ancestors
-        em_test_classes << o if o.ancestors[1..-1].include? TestEM::TestCase
-      end
+    suites = TestEM::TestCase.test_suites
+    if @explicit_tests.empty?
+      @randomize_test_order ? suites.sort_by {rand} : suites.sort_by {|k| k.name}
+    else
+      suite_names_from_explicit_tests.map do |name|
+        suites.find {|sc| sc.name == name}
+      end.compact
     end
-    em_test_classes.sort {rand}
   end
 
   def weed_out_testless_base_classes(classes)
     classes.reject do |c|
-      find_test_methods(c).empty?  &&  classes.any? {|o| o.ancestors[1..-1].include? c}
+      find_test_methods(c).empty?  &&  (classes.any? {|o| o.ancestors[1..-1].include? c})
     end
   end
 
   def run_test_suites(suites)
     @suites_pending = suites
     @current_suite = nil
-    EventMachine.run {
-      @commence_test_run_proc = lambda do
-        @suite_timer = EM.add_periodic_timer(0.01) {run_next_test_suite}
-        run_next_test_suite
-      end
-      run_one_time_init_blocks
-    }
+    begin
+      EventMachine.run {
+        @commence_test_run_proc = lambda do
+          @suite_timer = EM.add_periodic_timer(0.01) {poll_run_next_test_suite}
+          poll_run_next_test_suite
+        end
+        run_one_time_init_blocks
+      }
+    rescue Exception => ex
+      @out.puts("\nWARNING: run_test_suites: exception: #{ex.message} - #{ex.backtrace.inspect}\n\n")
+      raise
+    ensure
+      all_completed = @suites_pending.empty?  &&  (@pending_tests.nil? || @pending_tests.empty?)
+      @out.puts("\nWARNING: Someone stopped EventMachine before all tests were run...\n\n") unless all_completed
+      identify_missing_explicit_tests
+      display_test_results
+    end
   end
 
   def record_test_attempt(tc_instance)
@@ -83,7 +128,7 @@ class Runner
   end
   
   def advance_to_next_test
-    @current_test = nil
+    finalize_current_test
   end
 
   def current_test_name
@@ -94,8 +139,40 @@ class Runner
 
   protected
 
+  def suite_name_from_test(tname)
+    tname.sub(/\.[^.]+\z/, "")
+  end
+
+  def suite_names_from_explicit_tests
+    @explicit_tests_list.map {|tname| suite_name_from_test(tname)}.uniq
+  end
+  
+  def init_explicit_tests(args)
+    @explicit_tests_list = args.map {|tname| tname.gsub(/#/,".")}
+    @explicit_tests = Hash.new(0)
+    @explicit_tests_list.each {|tname| @explicit_tests[tname] = 0}
+  end
+  
+  def record_explicit_tests_encountered(suite_class, tests)
+    tests.each do |m|
+      xname = "#{suite_class.name}.#{m}"
+      @explicit_tests[xname] += 1 if @explicit_tests.has_key? xname
+    end
+  end
+
   def find_test_methods(klass)
-    klass.instance_methods.select {|m| m.to_s =~ /^test_/}.sort {rand}
+    meths = klass.instance_methods.select {|m| m.to_s =~ /^test_/}
+    if @explicit_tests.empty?
+      @randomize_test_order ? meths.sort_by {rand} : meths.sort_by {|m| m.to_s}
+    else
+      @explicit_tests_list.map do |name|
+        meths.find {|m| "#{klass.name}.#{m}" == name}
+      end.compact
+    end
+  end
+
+  def wrap_tests_with_setup_methods(test_methods)
+    [:setup_suite] + test_methods.map {|m| [:setup, m, :teardown]}.flatten + [:teardown_suite]
   end
 
   def run_one_time_init_blocks
@@ -108,6 +185,7 @@ class Runner
         @out.print ">"
         blocks_pending -= 1
         if blocks_pending < 1
+          @out.puts
           @commence_test_run_proc.call
         end
       end
@@ -118,36 +196,41 @@ class Runner
     end
   end  
 
-  def run_next_test_suite
-    if @current_init_block
-    end
+  def poll_run_next_test_suite
+# @out.print "#"
     unless @current_suite
-      suite_class = @suites_pending.pop
+      suite_class = @suites_pending.shift
       if suite_class
         @current_suite = suite_class.new(self)
         @pending_tests = find_test_methods(@current_suite.class)
         @current_test = nil
         if @pending_tests.empty?
           record_test_failure(@current_suite, TestFailure.new("No tests defined."))
+        else
+          record_explicit_tests_encountered(suite_class, @pending_tests)
+          @pending_tests = wrap_tests_with_setup_methods(@pending_tests)
         end
       else
         @suite_timer.cancel
         EventMachine.stop
-        display_test_results
       end
     end
     if @current_suite
-      run_next_test
+      poll_run_next_test
     end
   end
   
-  def run_next_test
+  def finalize_current_suite
+    @current_suite = nil
+  end
+  
+  def poll_run_next_test
     unless @current_test
-      @current_test = @pending_tests.pop
+      @current_test = @pending_tests.shift
       if @current_test
         initiate_test(@current_suite, @current_test)
       else
-        @current_suite = nil
+        finalize_current_suite
       end
     end
     if @current_test
@@ -160,16 +243,21 @@ class Runner
     completion_callback = lambda {advance_to_next_test}
     if defined? Fiber
       runner = Fiber.new do
+$stderr.puts("\n[fib=#{Fiber.current.object_id}] ********** initiate_test: #{suite_instance.class.name}.#{test_method} **********") unless test_method.to_s =~ /\A(setup|setup_suite|teardown|teardown_suite)\z/
         catch :failed do
-          suite_instance.initiate_test(test_method, completion_callback)
+          suite_instance.__initiate_test__(test_method, completion_callback)
         end
       end
       runner.transfer
     else
       catch :failed do
-        suite_instance.initiate_test(test_method, completion_callback)
+        suite_instance.__initiate_test__(test_method, completion_callback)
       end
     end
+  end
+  
+  def finalize_current_test
+    @current_test = nil
   end
   
   def check_test_timeout
@@ -177,24 +265,34 @@ class Runner
     tout = @test_start_time + duration
     if Time.now > tout
       record_test_error(@current_suite, TestError.new("TimeOut: #{current_test_name} duration exceeded #{duration} seconds"))
-      @current_test = nil
+      finalize_current_test
     end
+  end
+  
+  def identify_missing_explicit_tests
+    missing = @explicit_tests.keys.select {|k| @explicit_tests[k].zero?}.sort
+    missing.each {|name| record_test_error(self, TestError.new("Missing explicit test: #{name}"))}
   end
   
   def display_test_results
     @out.puts
     @out.puts "#@num_attempts assertions, #@num_failures failures, #@num_errors errors."
-    (@errors + @failures).each do |suite_class, ex|
+    (@errors + @failures).each do |suite_class, ex, usermsg|
       @out.puts
-      display_failed_test(suite_class, ex)
+      display_failed_test(suite_class, ex, usermsg)
     end
   end
   
-  def display_failed_test(suite_class, ex)
-    @out.puts "#{suite_class.name}: #{ex.class.name} - #{ex.message}"
-    if (ex.class != TestFailure)  &&  (bt = ex.backtrace)
+  def display_failed_test(suite_class, ex, usermsg)
+    msg = "#{suite_class.name}: #{ex.class.name} - #{ex.message}"
+    msg << " - #{usermsg}" unless usermsg.empty?
+    @out.puts msg
+    # if (ex.class != TestFailure)  &&  (bt = ex.backtrace)
+    if (bt = ex.backtrace)
       bt.each do |line|
-        @out.puts "        #{line}"
+        unless line =~ /em_test_runner.rb:/  ### mega kludge!!! (is there a reasonable way to know our filename?)
+          @out.puts "        #{line}"
+        end
       end
     end
   end 
@@ -209,7 +307,19 @@ module Assertions
   
   def assert_equal(expected, actual, message="")
     try_assert(message) do
-      fail("#{expected.inspect} expected, but was #{actual.inspect}") unless expected == actual
+      fail("\n#{expected.pretty_inspect}\nexpected, but was\n\n#{actual.pretty_inspect}") unless expected == actual
+    end
+  end
+
+  def assert_match(regexp, string, message="")
+    try_assert(message) do
+      fail("#{regexp.inspect} expected to match #{string.inspect}") unless regexp =~ string
+    end
+  end
+
+  def assert_no_match(regexp, string, message="")
+    try_assert(message) do
+      fail("#{regexp.inspect} expected NOT to match #{string.inspect}") if regexp =~ string
     end
   end
 
@@ -242,6 +352,10 @@ module Assertions
 
   def try_exec(message="")
     begin
+      # Explictly enforcing String message type deemed to be the
+      # lesser evil than silently succeeding when assert is used
+      # instead of assert_equal in cases like: assert( 2, Foo.num_foos )
+      raise("Non-string message argument") unless message.is_a? String
       yield
     rescue SignalException, SystemExit => ex
       raise
@@ -288,22 +402,41 @@ end
 class TestCase
   include Assertions
 
+  class << self
+    @@test_suites = []
+    def test_suites
+      @@test_suites
+    end
+    def inherited(subclass)
+      @@test_suites << subclass
+    end
+  end
+  
   def initialize(runner)
     @test_runner = runner
   end
   
-  def setup
+  def setup_suite(completion_callback)
+    completion_callback.call
   end
   
-  def teardown
+  def teardown_suite(completion_callback)
+    completion_callback.call
   end
 
-  def initiate_test(test_method, completion_callback)
+  def setup(completion_callback)
+    completion_callback.call
+  end
+  
+  def teardown(completion_callback)
+    completion_callback.call
+  end
+  
+  def __initiate_test__(test_method, completion_callback)
     set_timeout(default_timeout_secs)
     try_exec do
       (method(test_method).arity == 1) or raise(TestError, "Test method #{self.class.name}##{test_method} is missing its completion_callback argument")
-      setup
-      cc = lambda { try_exec {teardown} ; completion_callback.call }
+      cc = lambda { completion_callback.call }
       self.send(test_method, cc)
     end
   end
@@ -324,20 +457,45 @@ end
 end # TestEM
 
 
-at_exit do
-  r = TestEM::Runner.new
-  r.run
-end
+##############################################################################
+##############################################################################
+##############################################################################
 
+if $0 != __FILE__
 
-if $0 == __FILE__
+  # Normal case when not self-testing:
+  # Run tests at program exit:
+  at_exit do
+    explicit_tests = ARGV
+    r = TestEM::Runner.new(explicit_tests)
+    r.run
+  end
+
+else
+
+  # Perform self-tests
 
   class FooBase < TestEM::TestCase
     # no tests defined here, but should not produce an
     # error, because there are derived classes
   end
   
-  class Foo < FooBase
+  class FooBase2 < FooBase
+  end
+  
+  class Foo < FooBase2
+    class << self
+      attr_accessor :num_foos
+    end
+    
+    @num_foos = 0
+    
+    def test_foo(completed)
+      self.class.num_foos += 1
+      assert(true)
+      completed.call
+    end
+    
     def test_simple(completed)
       assert(true)
       completed.call
@@ -352,27 +510,94 @@ if $0 == __FILE__
     end
   end
 
+  class Foo2 < FooBase2
+    class << self
+      attr_accessor :num_foos
+    end
+    
+    @num_foos = 0
+    
+    def test_foo2(completed)
+      self.class.num_foos += 1
+      assert(true)
+      completed.call
+    end
+  end
+  
   class Bar < TestEM::TestCase
     # no tests defined
   end
 
   class Baz < TestEM::TestCase
+    class << self
+      attr_accessor :expected_setups, :setups, :teardowns, :suite_setups, :suite_teardowns, :setups_seq
+    end
+    
+    @suite_setups = 0
+    @suite_teardowns = 0
+    @setups = 0
+    @teardowns = 0
+    @setups_seq = []
+    
+    def setup_suite(completed)
+      self.class.suite_setups += 1
+      self.class.setups_seq << "setup_suite"
+      completed.call
+    end
+    
+    def teardown_suite(completed)
+      self.class.suite_teardowns += 1
+      self.class.setups_seq << "teardown_suite"
+      completed.call
+    end
+
+    def setup(completed)
+      self.class.setups += 1
+      self.class.setups_seq << "setup"
+      completed.call
+    end
+    
+    def teardown(completed)
+      self.class.teardowns += 1
+      self.class.setups_seq << "teardown"
+      completed.call
+    end
+    
     def test_timeout(completed)
+      self.class.setups_seq << "test"
       set_timeout(1)
       # return without calling completed, expect timeout
     end
     
     def test_init_result(completed)
+      self.class.setups_seq << "test"
       assert_equal( "uno dos tres.", $initcb )
       completed.call
     end
     
     def test_failure(completed)
-      assert_equal("Two plus two", "five")
+      self.class.setups_seq << "test"
+      assert_equal("Two plus two", "five", "for very large quantities of two!")
       raise "Should Never Get Here"
     end
+    
+    @expected_setups = self.instance_methods.grep(/^test_/).length
   end
 
+  class Qux < TestEM::TestCase
+    class << self
+      attr_accessor :num_quxes
+    end
+    
+    @num_quxes = 0
+    
+    def test_qux(completed)
+      self.class.num_quxes += 1
+      assert(true)
+      completed.call
+    end
+  end
+  
   TestEM::Runner.after_em_start do |completed|
     $initcb = "uno "
     EM.add_timer(0.25) do
@@ -388,26 +613,96 @@ if $0 == __FILE__
 
   ############################################################################
   
-  include TestEM::Assertions
+  require 'stringio'
   
-  r = TestEM::Runner.new
+  include TestEM::Assertions  # assertions can be used independently of test suites
+
+  # a few basic assertions
   assert(true)
   assert_raises(TestEM::TestFailure) { assert(false) }
+  assert_match( /sNiCkEr/i , "The vorpal blade went snicker-snack!" )
+  assert_no_match( /sNiCkEr/ , "The vorpal blade went snicker-snack!" )
+
+  out = StringIO.new
+
+  ############################################################################
+  # first try running only explicitly selected tests
+  r = TestEM::Runner.new(%w(Qux.test_qux Foo.test_foo Bogus.test_nonexistent), out, randomize_test_order:false)
+
+  # verify the runner locates suites properly:
   suites = r.find_test_suites
-  assert_equal( %w(Bar Baz Foo FooBase), suites.map{|tc| tc.name}.sort )
-  suites = r.weed_out_testless_base_classes(suites)
-  assert_equal( %w(Bar Baz Foo), suites.map{|tc| tc.name}.sort )
+  assert_equal( %w(Qux Foo), suites.map{|tc| tc.name} )
   
-  puts <<ENDTXT
-We are expecting:
-5 assertions, 2 failures, 1 errors.
+  r.run
+  
+  assert_equal( 1, Foo.num_foos )
+  assert_equal( 0, Foo2.num_foos )
+  assert_equal( 1, Qux.num_quxes )
+  assert( Baz.expected_setups > 1 )
+  assert_equal( 0, Baz.setups )
+  assert_equal( 0, Baz.teardowns )
+  assert_equal( 0, Baz.suite_setups )
+  assert_equal( 0, Baz.suite_teardowns )
+
+  
+  ############################################################################
+  # next try running all tests
+  r = TestEM::Runner.new([], out, randomize_test_order:false)
+
+  # verify the runner locates suites properly:
+  suites = r.find_test_suites
+  assert_equal( %w(Bar Baz Foo Foo2 FooBase FooBase2 Qux), suites.map{|tc| tc.name} )
+  suites = r.weed_out_testless_base_classes(suites)
+  assert_equal( %w(Bar Baz Foo Foo2 Qux), suites.map{|tc| tc.name} )
+  
+  r.run
+  
+  assert_equal( 2, Foo.num_foos )
+  assert_equal( 1, Foo2.num_foos )
+  assert_equal( 2, Qux.num_quxes )
+  assert( Baz.expected_setups > 1 )
+  assert_equal( Baz.expected_setups, Baz.setups )
+  assert_equal( Baz.expected_setups, Baz.teardowns )
+  assert_equal( 1, Baz.suite_setups )
+  assert_equal( 1, Baz.suite_teardowns )
+  assert_equal( "setup_suite setup test teardown setup test teardown setup test teardown teardown_suite",
+                Baz.setups_seq.join(" ") )
+
+  out_expected = (<<ENDTXT).strip
+<<>>
+..E
+2 assertions, 0 failures, 1 errors.
+
+TestEM::Runner: TestEM::TestError - Missing explicit test: Bogus.test_nonexistent
+<<>>
+F.F.E......
+8 assertions, 2 failures, 1 errors.
 
 Baz: TestEM::TestError - TimeOut: Baz#test_timeout duration exceeded 1 seconds
 
 Bar: TestEM::TestFailure - No tests defined.
 
-Baz: TestEM::TestFailure - Baz#test_failure - "Two plus two" expected, but was "five"
+Baz: TestEM::TestFailure - Baz#test_failure -\x20
+"Two plus two"
 
+expected, but was
+
+"five"
+ - for very large quantities of two!
 ENDTXT
-end
 
+  out.seek(0)
+  out_actual = out.read.strip
+
+  if out_expected == out_actual
+    puts "Success!"
+  else
+    puts "EXPECTED OUTPUT FAIL:"
+    puts "************************** expected:", out_expected
+    puts "************************** actual:", out_actual
+    puts "**************************"
+  end
+  
+end # __FILE__
+
+# TODO: display_failed_test is not printing the user message!
