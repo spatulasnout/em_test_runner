@@ -42,6 +42,57 @@ if defined? Fiber
   require 'fiber'
 end
 
+module ANSI
+  Reset   = "0"
+  Bright  = "1"
+  
+  Black   = "30"
+  Red     = "31"
+  Green   = "32"
+  Yellow  = "33"
+  Blue    = "34"
+  Magenta = "35"
+  Cyan    = "36"
+  White   = "37"
+  
+  BGBlack   = "40"
+  BGRed     = "41"
+  BGGreen   = "42"
+  BGYellow  = "43"
+  BGBlue    = "44"
+  BGMagenta = "45"
+  BGCyan    = "46"
+  BGWhite   = "47"
+
+  def color(*colors)
+    "\033[#{colors.join(';')}m"
+  end
+  
+  def colorize(str, start_color, end_color = Reset)
+    start_color = start_color.join(";") if start_color.respond_to? :join
+    end_color = end_color.join(";") if end_color.respond_to? :join
+    "#{color(start_color)}#{str}#{color(end_color)}"
+  end
+  
+  def red(str);     colorize(str, Red) end
+  def green(str);   colorize(str, Green) end
+  def yellow(str);  colorize(str, Yellow) end
+  def blue(str);    colorize(str, Blue) end
+  def magenta(str); colorize(str, Magenta) end
+  def cyan(str);    colorize(str, Cyan) end
+  def white(str);   colorize(str, White) end
+
+  def bright_red(str);      colorize(str, [Bright, Red]) end
+  def bright_green(str);    colorize(str, [Bright, Green]) end
+  def bright_yellow(str);   colorize(str, [Bright, Yellow]) end
+  def bright_blue(str);     colorize(str, [Bright, Blue]) end
+  def bright_magenta(str);  colorize(str, [Bright, Magenta]) end
+  def bright_cyan(str);     colorize(str, [Bright, Cyan]) end
+  def bright_white(str);    colorize(str, [Bright, White]) end
+  
+  extend self
+end # ANSI
+
 module TestEM
 
 class TestError < RuntimeError ; end
@@ -53,9 +104,10 @@ class Runner
     @@one_time_init_blocks << block
   end
   
-  def initialize(explicit_tests=[], out=$stderr, flags={randomize_test_order:true})
+  def initialize(explicit_tests=[], out=$stderr, flags={randomize_test_order:true, enable_color:true})
     @@one_time_init_blocks ||= []
     @randomize_test_order = flags[:randomize_test_order]
+    @enable_color = flags[:enable_color]
     @num_attempts = 0
     @num_failures = 0
     @num_errors = 0
@@ -100,11 +152,11 @@ class Runner
         run_one_time_init_blocks
       }
     rescue Exception => ex
-      @out.puts("\nWARNING: run_test_suites: exception: #{ex.message} - #{ex.backtrace.inspect}\n\n")
+      @out.puts(colorize_error("\nWARNING: run_test_suites: exception: #{ex.message} - #{ex.backtrace.inspect}\n\n"))
       raise
     ensure
       all_completed = @suites_pending.empty?  &&  (@pending_tests.nil? || @pending_tests.empty?)
-      @out.puts("\nWARNING: Someone stopped EventMachine before all tests were run...\n\n") unless all_completed
+      @out.puts(colorize_error("\nWARNING: Someone stopped EventMachine before all tests were run...\n\n")) unless all_completed
       identify_missing_explicit_tests
       display_test_results
     end
@@ -112,19 +164,19 @@ class Runner
 
   def record_test_attempt(tc_instance)
     @num_attempts += 1
-    @out.print "."
+    @out.print colorize_progress(".")
   end
 
   def record_test_failure(tc_instance, ex, usermsg="")
     @num_failures += 1
     @failures << [tc_instance.class, ex, usermsg]
-    @out.print "F"
+    @out.print colorize_fail("F")
   end
 
   def record_test_error(tc_instance, ex, usermsg="")
     @num_errors += 1
     @errors << [tc_instance.class, ex, usermsg]
-    @out.print "E"
+    @out.print colorize_error("E")
   end
   
   def advance_to_next_test
@@ -139,6 +191,14 @@ class Runner
 
   protected
 
+  def colorize_progress(str);               @enable_color ? ANSI.yellow(str) : str; end
+  def colorize_success(str);                @enable_color ? ANSI.bright_green(str) : str; end
+  def colorize_fail(str);                   @enable_color ? ANSI.bright_red(str) : str; end
+  def colorize_error(str);                  @enable_color ? ANSI.bright_red(str) : str; end
+  def colorize_initiate(str);               @enable_color ? ANSI.yellow(str) : str; end
+  def colorize_failed_test_reason(str);     @enable_color ? ANSI.bright_yellow(str) : str; end
+  def colorize_failed_test_backtrace(str);  @enable_color ? ANSI.bright_yellow(str) : str; end
+  
   def suite_name_from_test(tname)
     tname.sub(/\.[^.]+\z/, "")
   end
@@ -243,7 +303,7 @@ class Runner
     completion_callback = lambda {advance_to_next_test}
     if defined? Fiber
       runner = Fiber.new do
-$stderr.puts("\n[fib=#{Fiber.current.object_id}] ********** initiate_test: #{suite_instance.class.name}.#{test_method} **********") unless test_method.to_s =~ /\A(setup|setup_suite|teardown|teardown_suite)\z/
+$stderr.puts(colorize_initiate("\n[fib=#{Fiber.current.object_id}] ********** initiate_test: #{suite_instance.class.name}.#{test_method} **********")) unless test_method.to_s =~ /\A(setup|setup_suite|teardown|teardown_suite)\z/
         catch :failed do
           suite_instance.__initiate_test__(test_method, completion_callback)
         end
@@ -275,8 +335,9 @@ $stderr.puts("\n[fib=#{Fiber.current.object_id}] ********** initiate_test: #{sui
   end
   
   def display_test_results
+    color_proc = ((@errors + @failures).length.zero?) ? method(:colorize_success) : method(:colorize_fail)
     @out.puts
-    @out.puts "#@num_attempts assertions, #@num_failures failures, #@num_errors errors."
+    @out.puts color_proc.call("#@num_attempts assertions, #@num_failures failures, #@num_errors errors.")
     (@errors + @failures).each do |suite_class, ex, usermsg|
       @out.puts
       display_failed_test(suite_class, ex, usermsg)
@@ -286,12 +347,12 @@ $stderr.puts("\n[fib=#{Fiber.current.object_id}] ********** initiate_test: #{sui
   def display_failed_test(suite_class, ex, usermsg)
     msg = "#{suite_class.name}: #{ex.class.name} - #{ex.message}"
     msg << " - #{usermsg}" unless usermsg.empty?
-    @out.puts msg
+    @out.puts colorize_failed_test_reason(msg)
     # if (ex.class != TestFailure)  &&  (bt = ex.backtrace)
     if (bt = ex.backtrace)
       bt.each do |line|
         unless line =~ /em_test_runner.rb:/  ### mega kludge!!! (is there a reasonable way to know our filename?)
-          @out.puts "        #{line}"
+          @out.puts colorize_failed_test_backtrace("        #{line}")
         end
       end
     end
