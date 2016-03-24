@@ -104,10 +104,11 @@ class Runner
     @@one_time_init_blocks << block
   end
   
-  def initialize(explicit_tests=[], out=$stderr, flags={randomize_test_order:true, enable_color:true})
+  def initialize(explicit_tests=[], out=$stderr, flags={randomize_test_order:true, enable_color:true, show_code_snippet:true})
     @@one_time_init_blocks ||= []
     @randomize_test_order = flags[:randomize_test_order]
     @enable_color = flags[:enable_color]
+    @show_code_snippet = flags[:show_code_snippet]
     @num_attempts = 0
     @num_failures = 0
     @num_errors = 0
@@ -196,6 +197,8 @@ class Runner
   def colorize_initiate(str);               @enable_color ? ANSI.yellow(str) : str; end
   def colorize_failed_test_reason(str);     @enable_color ? ANSI.bright_yellow(str) : str; end
   def colorize_failed_test_backtrace(str);  @enable_color ? ANSI.bright_yellow(str) : str; end
+  def colorize_snippet_context(str);        @enable_color ? ANSI.cyan(str) : str; end
+  def colorize_snippet(str);                @enable_color ? ANSI.bright_cyan(str) : str; end
   
   def suite_name_from_test(tname)
     tname.sub(/\.[^.]+\z/, "")
@@ -350,13 +353,52 @@ $stderr.puts(colorize_initiate("\n[fib=#{Fiber.current.object_id}] ********** in
     @out.puts colorize_failed_test_reason(msg)
     # if (ex.class != TestFailure)  &&  (bt = ex.backtrace)
     if (bt = ex.backtrace)
+      bt = bt.reject {|line| line.start_with?(__FILE__)}
       bt.each do |line|
-        unless line =~ /em_test_runner.rb:/  ### mega kludge!!! (is there a reasonable way to know our filename?)
-          @out.puts colorize_failed_test_backtrace("        #{line}")
+        @out.puts colorize_failed_test_backtrace("        #{line}")
+      end
+      try_show_failing_code_snippet(bt.first) if @show_code_snippet
+    end
+  end
+  
+  def try_show_failing_code_snippet(backtrace_line)
+    # "M:/dev/ruby-current/lib/ruby/2.2.0/irb/workspace.rb:86:in `evaluate'"
+    if backtrace_line =~ %r{\A(.*):(\d+):in `(.*)'\z}
+      filepath, line, mname = $1, $2.to_i, $3
+      if test(?f, filepath)
+        begin
+          @out.puts
+          show_failing_code_snippet(filepath, line, mname)
+        rescue StandardError => ex
+          warn colorize_error("(Failed to show code snippet for file: #{filepath.inspect} - #{ex.message})")
         end
       end
     end
-  end 
+  end
+  
+  SNIPPET_CONTEXT = 3
+  def show_failing_code_snippet(filepath, line_no, mname)
+    fname_mname = "#{File.basename(filepath)}:#{mname}()"
+    @out.puts colorize_snippet_context(fname_mname)
+    start_line = (line_no - SNIPPET_CONTEXT)
+    end_line = (line_no + SNIPPET_CONTEXT)
+    ln = 1
+    IO.foreach(filepath) do |line|
+      if (ln >= start_line  &&  ln <= end_line)
+        line.chomp!
+        show_snippet_line(line, ln, line_no)
+      end
+      ln += 1
+      break if ln > end_line
+    end
+  end
+  
+  def show_snippet_line(line, cur_line_no, mark_line_no)
+    at_mark = (cur_line_no == mark_line_no)
+    color_proc = (at_mark) ? method(:colorize_snippet) : method(:colorize_snippet_context)
+    prefix = "  %5d%s " % [cur_line_no, (at_mark) ? ">" : ":"]
+    @out.puts(color_proc.call(prefix + line))
+  end
 end
 
 module Assertions
