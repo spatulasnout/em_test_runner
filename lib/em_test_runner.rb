@@ -196,6 +196,7 @@ class Runner
   def colorize_error(str);                  @enable_color ? ANSI.bright_red(str) : str; end
   def colorize_initiate(str);               @enable_color ? ANSI.yellow(str) : str; end
   def colorize_failed_test_reason(str);     @enable_color ? ANSI.bright_yellow(str) : str; end
+  def colorize_failed_test_usermsg(str);    @enable_color ? ANSI.bright_magenta(str) : str; end
   def colorize_failed_test_backtrace(str);  @enable_color ? ANSI.bright_yellow(str) : str; end
   def colorize_snippet_context(str);        @enable_color ? ANSI.cyan(str) : str; end
   def colorize_snippet(str);                @enable_color ? ANSI.bright_cyan(str) : str; end
@@ -348,9 +349,10 @@ $stderr.puts(colorize_initiate("\n[fib=#{Fiber.current.object_id}] ********** in
   end
   
   def display_failed_test(suite_class, ex, usermsg)
-    msg = "#{suite_class.name}: #{ex.class.name} - #{ex.message}"
-    msg << " - #{usermsg}" unless usermsg.empty?
-    @out.puts colorize_failed_test_reason(msg)
+    msg = colorize_failed_test_reason("#{suite_class.name}: #{ex.class.name} - #{ex.message}")
+    msg << colorize_failed_test_usermsg(" - #{usermsg}") unless usermsg.empty?
+    msg << "\n"
+    @out.puts msg
     # if (ex.class != TestFailure)  &&  (bt = ex.backtrace)
     if (bt = ex.backtrace)
       bt = bt.reject {|line| line.start_with?(__FILE__)}
